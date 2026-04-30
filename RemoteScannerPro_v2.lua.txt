@@ -1,0 +1,918 @@
+-- ============================================================
+-- Remote Scanner Pro v2.0
+-- Fast / Quick / Scan / Deep  +  SPY (Communicate)
+-- ============================================================
+
+local Players     = game:GetService("Players")
+local CoreGui     = game:GetService("CoreGui")
+local LP          = Players.LocalPlayer
+
+-- ============================================================
+-- УТИЛИТЫ
+-- ============================================================
+
+local function safeGet(t, k)
+    local ok, v = pcall(function() return t[k] end)
+    return ok and v or nil
+end
+
+local function serialize(v, depth)
+    depth = depth or 0
+    if depth > 3 then return "..." end
+    local t = type(v)
+    if t == "string"  then return '"' .. tostring(v):sub(1, 80) .. '"' end
+    if t == "number"  then return tostring(v) end
+    if t == "boolean" then return tostring(v) end
+    if t == "nil"     then return "nil" end
+    if t == "table"   then
+        local parts = {}
+        local i = 0
+        for k2, v2 in next, v do
+            i = i + 1
+            if i > 8 then table.insert(parts, "..."); break end
+            table.insert(parts, tostring(k2) .. "=" .. serialize(v2, depth + 1))
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+    if t == "userdata" or t == "Instance" then
+        local ok2, name = pcall(tostring, v)
+        return ok2 and name or "userdata"
+    end
+    return t
+end
+
+local function serializeArgs(args)
+    local parts = {}
+    for i, v in ipairs(args) do
+        parts[i] = "[" .. i .. "] " .. serialize(v)
+    end
+    return table.concat(parts, "  |  ")
+end
+
+local function tryGetSource(remote)
+    local src = nil
+    pcall(function()
+        for _, c in ipairs(remote:GetDescendants()) do
+            local cls = safeGet(c, "ClassName")
+            if cls == "LocalScript" or cls == "Script" or cls == "ModuleScript" then
+                if decompile then
+                    local ok, code = pcall(decompile, c)
+                    if ok and type(code) == "string" and #code > 0 then
+                        src = "-- [decompile] " .. c:GetFullName() .. "\n" .. code
+                        return
+                    end
+                end
+                src = "-- [script, no decompile] " .. c:GetFullName()
+                return
+            end
+        end
+    end)
+    if src then return src end
+    pcall(function()
+        local meta = getrawmetatable and getrawmetatable(remote)
+        if not meta then return end
+        for _, k in ipairs({"__namecall","__index","__newindex","__call"}) do
+            local raw = rawget(meta, k)
+            if raw and type(raw) == "function" then
+                local info = debug.getinfo and debug.getinfo(raw, "S")
+                if info and info.short_src and info.short_src ~= "[C]" then
+                    src = "-- [hook: " .. k .. "]\n-- src: " .. info.short_src
+                    if info.linedefined then src = src .. "\n-- line: " .. info.linedefined end
+                    if decompile then
+                        local ok, code = pcall(decompile, raw)
+                        if ok and code and #code > 0 then src = src .. "\n\n" .. code end
+                    end
+                    return
+                end
+            end
+        end
+    end)
+    if src then return src end
+    return "-- Нет исходника\n-- Remote: " .. remote:GetFullName()
+end
+
+-- ============================================================
+-- СКАНЕР
+-- ============================================================
+
+local SCAN_MODES = {
+    Fast  = { depth = 2,  checkMeta = false, metaKeys = {},                                                                label = "FAST",  color = Color3.fromRGB(40,160,40)   },
+    Quick = { depth = 4,  checkMeta = true,  metaKeys = {"__namecall","__index"},                                          label = "QUICK", color = Color3.fromRGB(30,90,200)   },
+    Scan  = { depth = 6,  checkMeta = true,  metaKeys = {"__namecall","__index","__newindex","__call","__len"},             label = "SCAN",  color = Color3.fromRGB(160,120,20)  },
+    Deep  = { depth = 10, checkMeta = true,  metaKeys = {"__namecall","__index","__newindex","__call","__len","__concat","__tostring","__eq","__lt","__le","__add","__sub","__mul","__div","__mod","__pow","__unm","__metatable"}, label = "DEEP", color = Color3.fromRGB(180,30,30) },
+}
+
+local Scanner = {}
+function Scanner.run(modeName, onItem, onDone)
+    local cfg = SCAN_MODES[modeName]
+    if not cfg then onDone(0) return end
+    local found, visited = 0, {}
+    local queue = {{ inst = game, depth = 0 }}
+    local function processChunk()
+        local CHUNK = 300
+        local processed = 0
+        while #queue > 0 and processed < CHUNK do
+            local item   = table.remove(queue, 1)
+            local inst   = item.inst
+            local depth  = item.depth
+            processed    = processed + 1
+            if depth > cfg.depth then goto next end
+            local id = tostring(inst)
+            if visited[id] then goto next end
+            visited[id] = true
+            local cls = safeGet(inst, "ClassName")
+            if cls == "RemoteEvent" or cls == "RemoteFunction" then
+                found = found + 1
+                local entry = { ref = inst, name = inst:GetFullName(), class = cls, hooks = {}, hooked = false }
+                if cfg.checkMeta then
+                    pcall(function()
+                        local meta = getrawmetatable and getrawmetatable(inst)
+                        if not meta then return end
+                        for _, key in ipairs(cfg.metaKeys) do
+                            local raw = rawget(meta, key)
+                            if raw and type(raw) == "function" then
+                                local src = "?"
+                                pcall(function() local i = debug.getinfo(raw,"S"); src = i and i.short_src or "?" end)
+                                if src ~= "[C]" and src ~= "?" then
+                                    entry.hooked = true
+                                    table.insert(entry.hooks, { key = key, source = src, fn = raw })
+                                end
+                            end
+                        end
+                    end)
+                end
+                onItem(entry)
+            end
+            if depth < cfg.depth then
+                pcall(function()
+                    for _, child in ipairs(inst:GetChildren()) do
+                        table.insert(queue, { inst = child, depth = depth + 1 })
+                    end
+                end)
+            end
+            ::next::
+        end
+        if #queue > 0 then task.defer(processChunk)
+        else onDone(found) end
+    end
+    task.defer(processChunk)
+end
+
+-- ============================================================
+-- SPY ENGINE — перехват FireServer / InvokeServer
+-- ============================================================
+
+local SpyActive      = false
+local SpyConnections = {}
+local SpyLog         = {}        -- { time, remote, method, args, argsStr }
+local SpyOnLog       = nil       -- callback -> строка для GUI
+
+local OrigFireServer   = nil
+local OrigInvokeServer = nil
+
+local function hookRemote(remote, onFired)
+    -- Хукаем через __namecall метаметод
+    -- Проще и надёжнее — hookfunction на сам метод
+    local cls = safeGet(remote, "ClassName")
+    if cls == "RemoteEvent" then
+        -- hookfunction(remote.FireServer, ...) не работает напрямую в Roblox
+        -- Используем getrawmetatable + __namecall перехват на конкретный объект
+        local ok = pcall(function()
+            local meta = getrawmetatable(remote)
+            if not meta then return end
+            if setreadonly then pcall(setreadonly, meta, false) end
+            local oldNC = rawget(meta, "__namecall")
+            rawset(meta, "__namecall", newcclosure and newcclosure(function(self, ...)
+                local method = getnamecallmethod and getnamecallmethod() or ""
+                if self == remote and (method == "FireServer" or method == "InvokeServer") then
+                    local args = {...}
+                    onFired(method, args)
+                end
+                if oldNC then return oldNC(self, ...) end
+                return (self[method])(self, ...)
+            end) or function(self, ...)
+                local method = getnamecallmethod and getnamecallmethod() or ""
+                if self == remote and (method == "FireServer" or method == "InvokeServer") then
+                    onFired(method, {...})
+                end
+                if oldNC then return oldNC(self, ...) end
+            end)
+            if setreadonly then pcall(setreadonly, meta, true) end
+        end)
+        _ = ok
+    elseif cls == "RemoteFunction" then
+        pcall(function()
+            local meta = getrawmetatable(remote)
+            if not meta then return end
+            if setreadonly then pcall(setreadonly, meta, false) end
+            local oldNC = rawget(meta, "__namecall")
+            rawset(meta, "__namecall", newcclosure and newcclosure(function(self, ...)
+                local method = getnamecallmethod and getnamecallmethod() or ""
+                if self == remote and method == "InvokeServer" then
+                    onFired(method, {...})
+                end
+                if oldNC then return oldNC(self, ...) end
+            end) or function(self, ...)
+                local method = getnamecallmethod and getnamecallmethod() or ""
+                if self == remote and method == "InvokeServer" then
+                    onFired(method, {...})
+                end
+                if oldNC then return oldNC(self, ...) end
+            end)
+            if setreadonly then pcall(setreadonly, meta, true) end
+        end)
+    end
+end
+
+-- Глобальный __namecall хук (если есть hookmetamethod)
+local globalHookRestorer = nil
+
+local function startGlobalSpy(filter, onFired)
+    -- filter: nil = все ремоуты, "Communicate" = только с этим именем
+    if hookmetamethod then
+        -- Самый мощный способ
+        local meta = getrawmetatable(game)
+        globalHookRestorer = hookmetamethod(game, "__namecall", newcclosure and newcclosure(function(self, ...)
+            local method = getnamecallmethod and getnamecallmethod() or ""
+            if method == "FireServer" or method == "InvokeServer" then
+                local cls = safeGet(self, "ClassName")
+                if cls == "RemoteEvent" or cls == "RemoteFunction" then
+                    local name = tostring(self.Name or "?")
+                    if not filter or name:find(filter) then
+                        onFired(self, method, {...})
+                    end
+                end
+            end
+            return globalHookRestorer(self, ...)
+        end) or function(self, ...)
+            local method = getnamecallmethod and getnamecallmethod() or ""
+            if method == "FireServer" or method == "InvokeServer" then
+                local cls = safeGet(self, "ClassName")
+                if cls == "RemoteEvent" or cls == "RemoteFunction" then
+                    local name = tostring(self.Name or "?")
+                    if not filter or name:find(filter) then
+                        onFired(self, method, {...})
+                    end
+                end
+            end
+            return globalHookRestorer(self, ...)
+        end)
+        return true
+    end
+    return false
+end
+
+local function stopGlobalSpy()
+    globalHookRestorer = nil
+end
+
+-- ============================================================
+-- GUI BUILDER
+-- ============================================================
+
+local existing = CoreGui:FindFirstChild("RemoteScannerPro2")
+if existing then existing:Destroy() end
+
+local SG = Instance.new("ScreenGui")
+SG.Name           = "RemoteScannerPro2"
+SG.ResetOnSpawn   = false
+SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+SG.Parent         = CoreGui
+
+-- Вспомогательные функции GUI
+local function corner(p, r) local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 6); c.Parent = p end
+local function stroke(p, col, th) local s = Instance.new("UIStroke"); s.Color = col or Color3.fromRGB(70,60,110); s.Thickness = th or 1; s.Parent = p end
+local function label(p, props)
+    local L = Instance.new("TextLabel")
+    L.BackgroundTransparency = 1
+    L.Font   = Enum.Font.Gotham
+    L.TextSize = 11
+    for k, v in next, props do L[k] = v end
+    L.Parent = p
+    return L
+end
+local function btn(p, props)
+    local B = Instance.new("TextButton")
+    B.BorderSizePixel = 0
+    B.Font   = Enum.Font.GothamBold
+    B.TextSize = 11
+    B.TextColor3 = Color3.new(1,1,1)
+    for k, v in next, props do B[k] = v end
+    B.Parent = p
+    corner(B, 5)
+    return B
+end
+
+-- ============================================================
+-- ГЛАВНОЕ ОКНО
+-- ============================================================
+
+local Main = Instance.new("Frame")
+Main.Name             = "Main"
+Main.Size             = UDim2.new(0, 600, 0, 520)
+Main.Position         = UDim2.new(0.5, -300, 0.5, -260)
+Main.BackgroundColor3 = Color3.fromRGB(11, 11, 17)
+Main.BorderSizePixel  = 0
+Main.Active           = true
+Main.Draggable        = true
+Main.ClipsDescendants = true
+Main.Parent           = SG
+corner(Main, 8)
+stroke(Main, Color3.fromRGB(65,55,105))
+
+-- TitleBar
+local TB = Instance.new("Frame")
+TB.Size             = UDim2.new(1, 0, 0, 34)
+TB.BackgroundColor3 = Color3.fromRGB(16, 16, 26)
+TB.BorderSizePixel  = 0
+TB.Parent           = Main
+corner(TB, 8)
+-- Fix bottom corners
+local fix = Instance.new("Frame"); fix.Size = UDim2.new(1,0,0,8); fix.Position = UDim2.new(0,0,1,-8)
+fix.BackgroundColor3 = Color3.fromRGB(16,16,26); fix.BorderSizePixel = 0; fix.Parent = TB
+
+label(TB, {
+    Size = UDim2.new(1,-80,1,0), Position = UDim2.new(0,12,0,0),
+    Text = "Remote Scanner Pro v2  |  Fast / Quick / Scan / Deep / SPY",
+    TextColor3 = Color3.fromRGB(180,180,255), TextSize = 12,
+    Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left,
+})
+
+local CloseBtn = btn(TB, {
+    Size = UDim2.new(0,26,0,26), Position = UDim2.new(1,-30,0,4),
+    BackgroundColor3 = Color3.fromRGB(180,50,50), Text = "X", TextSize = 12,
+})
+CloseBtn.MouseButton1Click:Connect(function()
+    stopGlobalSpy()
+    SG:Destroy()
+end)
+
+-- ============================================================
+-- ВКЛАДКИ
+-- ============================================================
+
+local TabBar = Instance.new("Frame")
+TabBar.Size             = UDim2.new(1, 0, 0, 30)
+TabBar.Position         = UDim2.new(0, 0, 0, 34)
+TabBar.BackgroundColor3 = Color3.fromRGB(14, 14, 22)
+TabBar.BorderSizePixel  = 0
+TabBar.Parent           = Main
+
+local TBL = Instance.new("UIListLayout")
+TBL.FillDirection = Enum.FillDirection.Horizontal
+TBL.Padding       = UDim.new(0, 4)
+TBL.VerticalAlignment = Enum.VerticalAlignment.Center
+TBL.Parent        = TabBar
+local TBP = Instance.new("UIPadding"); TBP.PaddingLeft = UDim.new(0,6); TBP.Parent = TabBar
+
+local ContentArea = Instance.new("Frame")
+ContentArea.Size             = UDim2.new(1, 0, 1, -64)
+ContentArea.Position         = UDim2.new(0, 0, 0, 64)
+ContentArea.BackgroundTransparency = 1
+ContentArea.ClipsDescendants = true
+ContentArea.Parent           = Main
+
+local Tabs       = {}
+local ActiveTab  = nil
+
+local function makeTab(name, color)
+    local B = btn(TabBar, {
+        Size             = UDim2.new(0, 90, 0, 24),
+        BackgroundColor3 = Color3.fromRGB(22, 22, 32),
+        Text             = name,
+        TextColor3       = Color3.fromRGB(120, 120, 160),
+        TextSize         = 11,
+    })
+    local Page = Instance.new("ScrollingFrame")
+    Page.Size                  = UDim2.new(1, 0, 1, 0)
+    Page.BackgroundTransparency = 1
+    Page.BorderSizePixel       = 0
+    Page.ScrollBarThickness    = 4
+    Page.ScrollBarImageColor3  = Color3.fromRGB(70, 70, 120)
+    Page.CanvasSize            = UDim2.new(0, 0, 0, 0)
+    Page.Visible               = false
+    Page.Parent                = ContentArea
+    local PL = Instance.new("UIListLayout"); PL.Padding = UDim.new(0,5); PL.Parent = Page
+    local PP = Instance.new("UIPadding"); PP.PaddingAll = UDim.new(0,7); PP.Parent = Page
+    PL:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        Page.CanvasSize = UDim2.new(0,0,0, PL.AbsoluteContentSize.Y + 14)
+    end)
+    local tab = { Btn = B, Page = Page }
+    table.insert(Tabs, tab)
+    B.MouseButton1Click:Connect(function()
+        if ActiveTab then
+            ActiveTab.Page.Visible    = false
+            ActiveTab.Btn.BackgroundColor3 = Color3.fromRGB(22,22,32)
+            ActiveTab.Btn.TextColor3       = Color3.fromRGB(120,120,160)
+        end
+        ActiveTab = tab
+        Page.Visible     = true
+        B.BackgroundColor3 = color or Color3.fromRGB(60,50,110)
+        B.TextColor3       = Color3.new(1,1,1)
+    end)
+    return tab
+end
+
+local ScannerTab = makeTab("Scanner",    Color3.fromRGB(40,80,160))
+local SpyTab     = makeTab("SPY",        Color3.fromRGB(140,30,140))
+
+-- Активировать Scanner по умолчанию
+do
+    ActiveTab = ScannerTab
+    ScannerTab.Page.Visible    = true
+    ScannerTab.Btn.BackgroundColor3 = Color3.fromRGB(40,80,160)
+    ScannerTab.Btn.TextColor3       = Color3.new(1,1,1)
+end
+
+-- ============================================================
+-- ВКЛАДКА SCANNER
+-- ============================================================
+
+do
+    local page = ScannerTab.Page
+
+    -- Кнопки режимов
+    local BtnRow = Instance.new("Frame")
+    BtnRow.Size             = UDim2.new(1,-2,0,38)
+    BtnRow.BackgroundTransparency = 1
+    BtnRow.Parent           = page
+    local BRL = Instance.new("UIListLayout"); BRL.FillDirection = Enum.FillDirection.Horizontal
+    BRL.Padding = UDim.new(0,5); BRL.VerticalAlignment = Enum.VerticalAlignment.Center; BRL.Parent = BtnRow
+
+    local MODES = {
+        { mode="Fast",  text="⚡ FAST",  col=Color3.fromRGB(30,140,30)  },
+        { mode="Quick", text="🔍 QUICK", col=Color3.fromRGB(25,75,185)  },
+        { mode="Scan",  text="📡 SCAN",  col=Color3.fromRGB(150,100,15) },
+        { mode="Deep",  text="🧬 DEEP",  col=Color3.fromRGB(160,25,25)  },
+    }
+
+    -- Статус
+    local StatusRow = Instance.new("Frame")
+    StatusRow.Size             = UDim2.new(1,-2,0,24)
+    StatusRow.BackgroundColor3 = Color3.fromRGB(14,14,22)
+    StatusRow.BorderSizePixel  = 0
+    StatusRow.Parent           = page
+    corner(StatusRow, 5)
+
+    local StatusLbl = label(StatusRow, {
+        Size = UDim2.new(1,-100,1,0), Position = UDim2.new(0,8,0,0),
+        Text = "Выбери режим скана",
+        TextColor3 = Color3.fromRGB(110,110,150),
+        TextXAlignment = Enum.TextXAlignment.Left,
+    })
+    local CountLbl = label(StatusRow, {
+        Size = UDim2.new(0,90,1,0), Position = UDim2.new(1,-94,0,0),
+        Text = "", TextColor3 = Color3.fromRGB(80,220,120),
+        TextXAlignment = Enum.TextXAlignment.Right,
+    })
+
+    -- Список
+    local ListBox = Instance.new("Frame")
+    ListBox.Size             = UDim2.new(1,-2,0,320)
+    ListBox.BackgroundColor3 = Color3.fromRGB(9,9,15)
+    ListBox.BorderSizePixel  = 0
+    ListBox.ClipsDescendants = true
+    ListBox.Parent           = page
+    corner(ListBox, 6)
+    stroke(ListBox, Color3.fromRGB(35,35,60))
+
+    local LS = Instance.new("ScrollingFrame")
+    LS.Size                  = UDim2.new(1,0,1,0)
+    LS.BackgroundTransparency = 1
+    LS.BorderSizePixel       = 0
+    LS.ScrollBarThickness    = 4
+    LS.ScrollBarImageColor3  = Color3.fromRGB(70,70,120)
+    LS.CanvasSize            = UDim2.new(0,0,0,0)
+    LS.Parent                = ListBox
+    local LL = Instance.new("UIListLayout"); LL.Padding = UDim.new(0,2); LL.Parent = LS
+    local LP2 = Instance.new("UIPadding"); LP2.PaddingAll = UDim.new(0,4); LP2.Parent = LS
+    LL:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        LS.CanvasSize = UDim2.new(0,0,0, LL.AbsoluteContentSize.Y + 8)
+    end)
+
+    -- Нижние кнопки
+    local ActRow = Instance.new("Frame")
+    ActRow.Size             = UDim2.new(1,-2,0,32)
+    ActRow.BackgroundTransparency = 1
+    ActRow.Parent           = page
+    local AL = Instance.new("UIListLayout"); AL.FillDirection = Enum.FillDirection.Horizontal
+    AL.Padding = UDim.new(0,5); AL.Parent = ActRow
+
+    local ClearBtn  = btn(ActRow,{Size=UDim2.new(0,160,0,30),BackgroundColor3=Color3.fromRGB(40,20,20),Text="🗑  Очистить"})
+    local NukeAllBtn= btn(ActRow,{Size=UDim2.new(0,180,0,30),BackgroundColor3=Color3.fromRGB(120,15,15),Text="☢  Nuke все хуки"})
+    local CopyBtn   = btn(ActRow,{Size=UDim2.new(0,160,0,30),BackgroundColor3=Color3.fromRGB(25,55,105),Text="📋 Копировать"})
+
+    -- Code viewer popup
+    local CodeWin = Instance.new("Frame")
+    CodeWin.Name             = "CodeWin"
+    CodeWin.Size             = UDim2.new(0,600,0,430)
+    CodeWin.Position         = UDim2.new(0.5,-300,0.5,-215)
+    CodeWin.BackgroundColor3 = Color3.fromRGB(7,7,13)
+    CodeWin.BorderSizePixel  = 0
+    CodeWin.Active           = true
+    CodeWin.Draggable        = true
+    CodeWin.Visible          = false
+    CodeWin.ZIndex           = 20
+    CodeWin.Parent           = SG
+    corner(CodeWin, 8)
+    stroke(CodeWin, Color3.fromRGB(90,50,170))
+
+    local CWHead = Instance.new("Frame"); CWHead.Size = UDim2.new(1,0,0,30)
+    CWHead.BackgroundColor3 = Color3.fromRGB(18,12,32); CWHead.BorderSizePixel = 0; CWHead.ZIndex = 21; CWHead.Parent = CodeWin
+    corner(CWHead, 8)
+    local cwfix = Instance.new("Frame"); cwfix.Size = UDim2.new(1,0,0,8); cwfix.Position = UDim2.new(0,0,1,-8)
+    cwfix.BackgroundColor3 = Color3.fromRGB(18,12,32); cwfix.BorderSizePixel = 0; cwfix.ZIndex = 21; cwfix.Parent = CWHead
+
+    local CWTitle = label(CWHead,{
+        Size=UDim2.new(1,-38,1,0),Position=UDim2.new(0,8,0,0),
+        Text="Code Viewer",TextColor3=Color3.fromRGB(180,140,255),
+        Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Left,ZIndex=22,
+    })
+    local CWClose = btn(CWHead,{Size=UDim2.new(0,24,0,24),Position=UDim2.new(1,-28,0,3),
+        BackgroundColor3=Color3.fromRGB(160,35,35),Text="X",TextSize=10,ZIndex=22,})
+    CWClose.MouseButton1Click:Connect(function() CodeWin.Visible = false end)
+
+    local CWScroll = Instance.new("ScrollingFrame")
+    CWScroll.Size=UDim2.new(1,-8,1,-36); CWScroll.Position=UDim2.new(0,4,0,32)
+    CWScroll.BackgroundTransparency=1; CWScroll.BorderSizePixel=0
+    CWScroll.ScrollBarThickness=4; CWScroll.ScrollBarImageColor3=Color3.fromRGB(90,50,180)
+    CWScroll.CanvasSize=UDim2.new(0,0,0,0); CWScroll.ZIndex=21; CWScroll.Parent=CodeWin
+
+    local CWText = Instance.new("TextLabel")
+    CWText.Size=UDim2.new(1,0,0,0); CWText.BackgroundTransparency=1
+    CWText.TextColor3=Color3.fromRGB(200,200,220); CWText.TextSize=11
+    CWText.Font=Enum.Font.Code; CWText.TextXAlignment=Enum.TextXAlignment.Left
+    CWText.TextYAlignment=Enum.TextYAlignment.Top; CWText.TextWrapped=true
+    CWText.AutomaticSize=Enum.AutomaticSize.Y; CWText.Text=""; CWText.ZIndex=22; CWText.Parent=CWScroll
+    CWText:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+        CWScroll.CanvasSize=UDim2.new(0,0,0, CWText.AbsoluteSize.Y+10)
+    end)
+
+    local function showCode(remote)
+        CWTitle.Text = "Code Viewer  —  " .. remote:GetFullName()
+        CWText.Text  = "-- Загружаю..."
+        CodeWin.Visible = true
+        task.defer(function() CWText.Text = tryGetSource(remote) end)
+    end
+
+    -- Рендер строки
+    local remoteEntries = {}
+
+    local function addRow(entry)
+        local Row = Instance.new("Frame")
+        Row.Size             = UDim2.new(1,-4,0,22)
+        Row.BackgroundColor3 = entry.hooked and Color3.fromRGB(48,14,14) or Color3.fromRGB(16,20,16)
+        Row.BorderSizePixel  = 0
+        Row.Parent           = LS
+        corner(Row, 4)
+
+        label(Row,{Size=UDim2.new(0,52,1,0),
+            Text= entry.hooked and " [HOOK]" or " [OK]  ",
+            TextColor3=entry.hooked and Color3.fromRGB(255,85,65) or Color3.fromRGB(65,200,85),
+            Font=Enum.Font.Code, TextXAlignment=Enum.TextXAlignment.Left,
+        })
+        label(Row,{Size=UDim2.new(0,26,1,0),Position=UDim2.new(0,52,0,0),
+            Text=entry.class=="RemoteEvent" and "RE" or "RF",
+            TextColor3=entry.class=="RemoteEvent" and Color3.fromRGB(90,155,255) or Color3.fromRGB(255,155,90),
+            Font=Enum.Font.GothamBold, TextXAlignment=Enum.TextXAlignment.Left,
+        })
+        label(Row,{Size=UDim2.new(1,-180,1,0),Position=UDim2.new(0,80,0,0),
+            Text=entry.name, TextColor3=Color3.fromRGB(195,195,215),
+            Font=Enum.Font.Code, TextXAlignment=Enum.TextXAlignment.Left,
+            TextTruncate=Enum.TextTruncate.AtEnd,
+        })
+
+        local CodeBtnR = btn(Row,{Size=UDim2.new(0,58,0,18),Position=UDim2.new(1,-124,0.5,-9),
+            BackgroundColor3=Color3.fromRGB(55,35,95),Text="< CODE >",TextSize=9,
+            TextColor3=Color3.fromRGB(195,155,255),
+        })
+        local NukeBtnR = btn(Row,{Size=UDim2.new(0,52,0,18),Position=UDim2.new(1,-60,0.5,-9),
+            BackgroundColor3=entry.hooked and Color3.fromRGB(115,18,18) or Color3.fromRGB(28,28,28),
+            Text="NUKE", TextSize=9,
+            TextColor3=entry.hooked and Color3.fromRGB(255,110,90) or Color3.fromRGB(70,70,70),
+        })
+        NukeBtnR.Active = entry.hooked
+
+        CodeBtnR.MouseButton1Click:Connect(function() showCode(entry.ref) end)
+        NukeBtnR.MouseButton1Click:Connect(function()
+            if not entry.hooked then return end
+            pcall(function()
+                local meta = getrawmetatable(entry.ref)
+                if not meta then return end
+                if setreadonly then pcall(setreadonly,meta,false) end
+                for _,h in ipairs(entry.hooks) do pcall(rawset,meta,h.key,nil) end
+                if setreadonly then pcall(setreadonly,meta,true) end
+            end)
+            entry.hooked=false; entry.hooks={}
+            Row.BackgroundColor3=Color3.fromRGB(16,20,16)
+            StatusLbl.Text="Нукнули: " .. entry.name
+            StatusLbl.TextColor3=Color3.fromRGB(80,220,120)
+        end)
+
+        table.insert(remoteEntries, entry)
+    end
+
+    local scanning = false
+
+    local function runScan(modeName)
+        if scanning then return end
+        scanning = true
+        -- Очистить
+        for _, c in ipairs(LS:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+        remoteEntries = {}
+        local cfg = SCAN_MODES[modeName]
+        StatusLbl.Text      = "[ " .. cfg.label .. " ] Сканирую..."
+        StatusLbl.TextColor3 = cfg.color
+        CountLbl.Text       = ""
+        local t0    = os.clock()
+        local total = 0
+        Scanner.run(modeName, function(entry)
+            total = total + 1
+            addRow(entry)
+            CountLbl.Text = tostring(total)
+        end, function(count)
+            local el = string.format("%.2f", os.clock()-t0)
+            StatusLbl.Text       = string.format("[ %s ] %d ремоутов — %sс", cfg.label, count, el)
+            StatusLbl.TextColor3 = Color3.fromRGB(80,220,120)
+            CountLbl.Text        = tostring(count) .. " rem"
+            scanning = false
+        end)
+    end
+
+    -- Создать кнопки режимов
+    for _, m in ipairs(MODES) do
+        local b = btn(BtnRow,{Size=UDim2.new(0,115,0,34),BackgroundColor3=m.col,Text=m.text,TextSize=12})
+        local mode = m.mode
+        b.MouseButton1Click:Connect(function() runScan(mode) end)
+    end
+
+    ClearBtn.MouseButton1Click:Connect(function()
+        for _, c in ipairs(LS:GetChildren()) do if c:IsA("Frame") then c:Destroy() end end
+        remoteEntries={}; StatusLbl.Text="Список очищен"; StatusLbl.TextColor3=Color3.fromRGB(100,100,140)
+        CountLbl.Text=""
+    end)
+    NukeAllBtn.MouseButton1Click:Connect(function()
+        local n=0
+        for _,e in ipairs(remoteEntries) do
+            if e.hooked then
+                pcall(function()
+                    local meta=getrawmetatable(e.ref)
+                    if not meta then return end
+                    if setreadonly then pcall(setreadonly,meta,false) end
+                    for _,h in ipairs(e.hooks) do pcall(rawset,meta,h.key,nil) end
+                    if setreadonly then pcall(setreadonly,meta,true) end
+                end)
+                e.hooked=false; e.hooks={}; n=n+1
+            end
+        end
+        StatusLbl.Text="Нукнуто " .. n .. " хуков"; StatusLbl.TextColor3=Color3.fromRGB(255,80,80)
+    end)
+    CopyBtn.MouseButton1Click:Connect(function()
+        local lines={}
+        for _,e in ipairs(remoteEntries) do
+            table.insert(lines, (e.hooked and "[HOOK] " or "[ok]   ") .. e.name)
+            for _,h in ipairs(e.hooks) do table.insert(lines,"  -> "..h.key.." @ "..h.source) end
+        end
+        local txt=table.concat(lines,"\n")
+        if setclipboard then pcall(setclipboard,txt) end
+        StatusLbl.Text="Скопировано"; StatusLbl.TextColor3=Color3.fromRGB(100,180,255)
+    end)
+
+    -- Авто-запуск
+    task.delay(0.5, function() runScan("Quick") end)
+end
+
+-- ============================================================
+-- ВКЛАДКА SPY
+-- ============================================================
+
+do
+    local page = SpyTab.Page
+
+    -- Контрол-бар
+    local CtrlRow = Instance.new("Frame")
+    CtrlRow.Size             = UDim2.new(1,-2,0,38)
+    CtrlRow.BackgroundTransparency = 1
+    CtrlRow.Parent           = page
+    local CRL = Instance.new("UIListLayout"); CRL.FillDirection=Enum.FillDirection.Horizontal
+    CRL.Padding=UDim.new(0,6); CRL.VerticalAlignment=Enum.VerticalAlignment.Center; CRL.Parent=CtrlRow
+
+    local StartBtn  = btn(CtrlRow,{Size=UDim2.new(0,130,0,34),BackgroundColor3=Color3.fromRGB(30,140,50),Text="▶  START SPY"})
+    local StopBtn   = btn(CtrlRow,{Size=UDim2.new(0,130,0,34),BackgroundColor3=Color3.fromRGB(100,20,20),Text="■  STOP SPY"})
+    local ClearSpy  = btn(CtrlRow,{Size=UDim2.new(0,110,0,34),BackgroundColor3=Color3.fromRGB(35,20,35),Text="🗑  Очистить"})
+    local CopySpy   = btn(CtrlRow,{Size=UDim2.new(0,120,0,34),BackgroundColor3=Color3.fromRGB(25,50,100),Text="📋 Копировать"})
+
+    -- Фильтр
+    local FilterRow = Instance.new("Frame")
+    FilterRow.Size             = UDim2.new(1,-2,0,28)
+    FilterRow.BackgroundColor3 = Color3.fromRGB(14,14,22)
+    FilterRow.BorderSizePixel  = 0
+    FilterRow.Parent           = page
+    corner(FilterRow,5)
+
+    label(FilterRow,{Size=UDim2.new(0,80,1,0),Position=UDim2.new(0,8,0,0),
+        Text="Фильтр имени:",TextColor3=Color3.fromRGB(110,110,150),TextXAlignment=Enum.TextXAlignment.Left,
+    })
+
+    local FilterBox = Instance.new("TextBox")
+    FilterBox.Size             = UDim2.new(1,-250,0,22)
+    FilterBox.Position         = UDim2.new(0,88,0.5,-11)
+    FilterBox.BackgroundColor3 = Color3.fromRGB(20,20,32)
+    FilterBox.BorderSizePixel  = 0
+    FilterBox.Text             = "Communicate"
+    FilterBox.TextColor3       = Color3.fromRGB(200,180,255)
+    FilterBox.TextSize         = 11
+    FilterBox.Font             = Enum.Font.Code
+    FilterBox.PlaceholderText  = "пусто = все ремоуты"
+    FilterBox.PlaceholderColor3 = Color3.fromRGB(80,80,100)
+    FilterBox.ClearTextOnFocus = false
+    FilterBox.Parent           = FilterRow
+    corner(FilterBox,4)
+
+    local AllToggle   = false
+    local AllTogBtn   = btn(FilterRow,{Size=UDim2.new(0,110,0,22),Position=UDim2.new(1,-120,0.5,-11),
+        BackgroundColor3=Color3.fromRGB(30,30,50),Text="Все ремоуты: OFF",TextSize=9,})
+    AllTogBtn.MouseButton1Click:Connect(function()
+        AllToggle = not AllToggle
+        AllTogBtn.Text             = "Все ремоуты: " .. (AllToggle and "ON" or "OFF")
+        AllTogBtn.BackgroundColor3 = AllToggle and Color3.fromRGB(80,200,100) or Color3.fromRGB(30,30,50)
+        AllTogBtn.TextColor3       = AllToggle and Color3.fromRGB(10,30,10) or Color3.new(1,1,1)
+        if AllToggle then FilterBox.Text = "" end
+    end)
+
+    -- Статус spy
+    local SpyStatus = Instance.new("Frame")
+    SpyStatus.Size             = UDim2.new(1,-2,0,24)
+    SpyStatus.BackgroundColor3 = Color3.fromRGB(12,12,20)
+    SpyStatus.BorderSizePixel  = 0
+    SpyStatus.Parent           = page
+    corner(SpyStatus,5)
+
+    local SpyStatusLbl = label(SpyStatus,{
+        Size=UDim2.new(1,-60,1,0),Position=UDim2.new(0,8,0,0),
+        Text="SPY: выключен",TextColor3=Color3.fromRGB(100,100,140),
+        TextXAlignment=Enum.TextXAlignment.Left,
+    })
+    local SpyCountLbl = label(SpyStatus,{
+        Size=UDim2.new(0,50,1,0),Position=UDim2.new(1,-54,0,0),
+        Text="0",TextColor3=Color3.fromRGB(200,100,255),
+        Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Right,
+    })
+
+    -- Лог
+    local LogBox = Instance.new("Frame")
+    LogBox.Size             = UDim2.new(1,-2,0,330)
+    LogBox.BackgroundColor3 = Color3.fromRGB(8,8,14)
+    LogBox.BorderSizePixel  = 0
+    LogBox.ClipsDescendants = true
+    LogBox.Parent           = page
+    corner(LogBox,6)
+    stroke(LogBox, Color3.fromRGB(80,30,100))
+
+    local LogScroll = Instance.new("ScrollingFrame")
+    LogScroll.Size                  = UDim2.new(1,0,1,0)
+    LogScroll.BackgroundTransparency = 1
+    LogScroll.BorderSizePixel       = 0
+    LogScroll.ScrollBarThickness    = 4
+    LogScroll.ScrollBarImageColor3  = Color3.fromRGB(120,40,160)
+    LogScroll.CanvasSize            = UDim2.new(0,0,0,0)
+    LogScroll.Parent                = LogBox
+
+    local LogLayout = Instance.new("UIListLayout"); LogLayout.Padding=UDim.new(0,2); LogLayout.Parent=LogScroll
+    local LogPad = Instance.new("UIPadding"); LogPad.PaddingAll=UDim.new(0,4); LogPad.Parent=LogScroll
+    LogLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        LogScroll.CanvasSize=UDim2.new(0,0,0, LogLayout.AbsoluteContentSize.Y+8)
+    end)
+
+    local spyCount = 0
+    local spyLines = {}   -- строки для копирования
+
+    local function addSpyLine(remote, method, args)
+        spyCount = spyCount + 1
+        SpyCountLbl.Text = tostring(spyCount)
+
+        local name   = remote:GetFullName()
+        local cls    = safeGet(remote, "ClassName") or "?"
+        local tag    = cls == "RemoteEvent" and "RE" or "RF"
+        local argsStr = serializeArgs(args)
+        local timeStr = string.format("[%05.1f]", os.clock() % 100000)
+
+        local line = string.format("%s [%s] %s  ::%s  %s", timeStr, tag, name, method, argsStr)
+        table.insert(spyLines, line)
+
+        -- Строка в GUI
+        local Row = Instance.new("Frame")
+        Row.Size             = UDim2.new(1,-4,0,0)
+        Row.AutomaticSize    = Enum.AutomaticSize.Y
+        Row.BackgroundColor3 = spyCount % 2 == 0 and Color3.fromRGB(14,10,20) or Color3.fromRGB(10,14,18)
+        Row.BorderSizePixel  = 0
+        Row.Parent           = LogScroll
+        corner(Row,3)
+
+        -- Время + тег
+        local HeadLbl = label(Row,{
+            Size=UDim2.new(1,-4,0,16),Position=UDim2.new(0,4,0,2),
+            Text=string.format("%s  [%s]  %s  ::%s", timeStr, tag, name, method),
+            TextColor3=method=="FireServer" and Color3.fromRGB(100,200,255) or Color3.fromRGB(255,180,100),
+            Font=Enum.Font.Code, TextSize=10, TextXAlignment=Enum.TextXAlignment.Left,
+            TextTruncate=Enum.TextTruncate.AtEnd,
+        })
+
+        -- Аргументы
+        if #args > 0 then
+            local ArgsLbl = label(Row,{
+                Size=UDim2.new(1,-8,0,0),Position=UDim2.new(0,8,0,18),
+                AutomaticSize=Enum.AutomaticSize.Y,
+                Text=argsStr,
+                TextColor3=Color3.fromRGB(190,190,210),
+                Font=Enum.Font.Code, TextSize=10,
+                TextXAlignment=Enum.TextXAlignment.Left,
+                TextWrapped=true,
+            })
+        end
+
+        -- Кнопка Script для копирования готового вызова
+        local CopyLineBtn = btn(Row,{
+            Size=UDim2.new(0,52,0,14),Position=UDim2.new(1,-56,0,2),
+            BackgroundColor3=Color3.fromRGB(40,30,70),Text="COPY",TextSize=8,
+            TextColor3=Color3.fromRGB(180,150,255),
+        })
+        CopyLineBtn.MouseButton1Click:Connect(function()
+            -- Генерируем готовый Lua-код вызова
+            local argParts = {}
+            for _, a in ipairs(args) do
+                local t = type(a)
+                if t == "string"  then table.insert(argParts, '"'..tostring(a):gsub('"','\\"')..'"')
+                elseif t == "number" or t == "boolean" then table.insert(argParts, tostring(a))
+                elseif t == "table" then table.insert(argParts, serialize(a))
+                else table.insert(argParts, "nil --[["..t.."]]") end
+            end
+            local code
+            if method == "FireServer" then
+                code = string.format(
+                    'local args = { %s }\ngame:GetService("Players").LocalPlayer.Character:WaitForChild("%s"):FireServer(unpack(args))',
+                    table.concat(argParts,", "), name
+                )
+            else
+                code = string.format(
+                    'local args = { %s }\ngame:GetService("Players").LocalPlayer.Character:WaitForChild("%s"):InvokeServer(unpack(args))',
+                    table.concat(argParts,", "), name
+                )
+            end
+            if setclipboard then pcall(setclipboard, code) end
+            SpyStatusLbl.Text      = "Скрипт скопирован!"
+            SpyStatusLbl.TextColor3 = Color3.fromRGB(180,150,255)
+        end)
+
+        -- Прокрутить вниз
+        LogScroll.CanvasPosition = Vector2.new(0, LogScroll.AbsoluteCanvasSize.Y)
+    end
+
+    -- Запуск / стоп
+    StartBtn.MouseButton1Click:Connect(function()
+        if SpyActive then return end
+        local filter = AllToggle and nil or (FilterBox.Text ~= "" and FilterBox.Text or nil)
+        local ok = startGlobalSpy(filter, function(remote, method, args)
+            task.defer(function()
+                addSpyLine(remote, method, args)
+            end)
+        end)
+        SpyActive = true
+        if ok then
+            SpyStatusLbl.Text       = "SPY: активен (hookmetamethod)  фильтр: " .. (filter or "ВСЕ")
+            SpyStatusLbl.TextColor3 = Color3.fromRGB(80,220,120)
+        else
+            SpyStatusLbl.Text       = "hookmetamethod недоступен — попробуй другой экзекутор"
+            SpyStatusLbl.TextColor3 = Color3.fromRGB(255,160,60)
+            SpyActive = false
+        end
+    end)
+
+    StopBtn.MouseButton1Click:Connect(function()
+        stopGlobalSpy()
+        SpyActive = false
+        SpyStatusLbl.Text       = "SPY: остановлен"
+        SpyStatusLbl.TextColor3 = Color3.fromRGB(180,80,80)
+    end)
+
+    ClearSpy.MouseButton1Click:Connect(function()
+        for _, c in ipairs(LogScroll:GetChildren()) do
+            if c:IsA("Frame") then c:Destroy() end
+        end
+        spyLines = {}; spyCount = 0; SpyCountLbl.Text = "0"
+    end)
+
+    CopySpy.MouseButton1Click:Connect(function()
+        if setclipboard and #spyLines > 0 then
+            pcall(setclipboard, table.concat(spyLines,"\n"))
+            SpyStatusLbl.Text = "Скопировано " .. #spyLines .. " строк"
+            SpyStatusLbl.TextColor3 = Color3.fromRGB(100,180,255)
+        end
+    end)
+end
+
+-- ============================================================
+
+print("[Remote Scanner Pro v2] Loaded.")
