@@ -1,0 +1,292 @@
+-- Communicate Spy
+-- Hooks FireServer + OnClientEvent на Communicate remote
+-- Логирует себя и других (через клиентские эвенты)
+
+local Players      = game:GetService("Players")
+local LocalPlayer  = Players.LocalPlayer
+local RunService   = game:GetService("RunService")
+
+------------------------------------------------
+-- Утилиты
+------------------------------------------------
+local function serialize(v, depth)
+    depth = depth or 0
+    if depth > 4 then return "..." end
+    local t = typeof(v)
+    if t == "table" then
+        local parts = {}
+        for k, val in pairs(v) do
+            local key = (type(k) == "string") and k or ("["..tostring(k).."]")
+            parts[#parts+1] = key.." = "..serialize(val, depth+1)
+        end
+        return "{ "..table.concat(parts, ", ").." }"
+    elseif t == "EnumItem" then
+        return "Enum."..tostring(v.EnumType).."."..v.Name
+    elseif t == "Instance" then
+        return v.ClassName..'("'..v.Name..'")'
+    elseif t == "string" then
+        return '"'..v..'"'
+    elseif t == "Vector3" then
+        return string.format("Vector3(%.2f, %.2f, %.2f)", v.X, v.Y, v.Z)
+    elseif t == "CFrame" then
+        return string.format("CFrame(%.2f, %.2f, %.2f)", v.X, v.Y, v.Z)
+    else
+        return tostring(v)
+    end
+end
+
+local function formatArgs(args)
+    local parts = {}
+    for i, v in ipairs(args) do
+        parts[i] = serialize(v)
+    end
+    return table.concat(parts, ",\n    ")
+end
+
+local function timestamp()
+    return string.format("[%05.2f]", tick() % 1000)
+end
+
+------------------------------------------------
+-- Лог-буфер + print
+------------------------------------------------
+local logs = {}
+local MAX_LOGS = 200
+
+local function log(tag, remote, args, source)
+    local entry = {
+        tag    = tag,      -- "OUT" | "IN"
+        remote = remote,
+        source = source or "?",
+        args   = args,
+        time   = timestamp(),
+    }
+    table.insert(logs, 1, entry)
+    if #logs > MAX_LOGS then table.remove(logs) end
+
+    -- Console
+    local goal = (type(args[1]) == "table" and args[1].Goal) and (" | Goal: "..tostring(args[1].Goal)) or ""
+    print(string.format(
+        "%s [%s] %s  ← %s%s\n    args: {\n    %s\n    }",
+        entry.time, tag, remote, source, goal, formatArgs(args)
+    ))
+end
+
+------------------------------------------------
+-- Hook FireServer (исходящие — наш LocalPlayer)
+------------------------------------------------
+local oldFireServer
+local mt = getrawmetatable and getrawmetatable(game)
+if mt then
+    -- Синтетический hook через metatable (некоторые экзекьюторы)
+    local oldIndex = mt.__index
+    setreadonly(mt, false)
+    oldFireServer = mt.__namecall
+    mt.__namecall = function(self, ...)
+        local method = getnamecallmethod()
+        if method == "FireServer" and self:IsA("RemoteEvent") then
+            local args = {...}
+            log("OUT ▲", self.Name, args, LocalPlayer.Name)
+        end
+        return oldFireServer(self, ...)
+    end
+    setreadonly(mt, true)
+else
+    -- Fallback: hook через hookfunction если есть
+    if hookfunction then
+        local RE = game:GetService("ReplicatedStorage") -- placeholder
+        -- hookfunction approach per-remote below
+    end
+end
+
+------------------------------------------------
+-- Spy OnClientEvent (входящие от сервера)
+-- Мониторим Communicate своего чара + других
+------------------------------------------------
+local hooked = {}
+
+local function hookCommunicate(character, playerName)
+    local remote = character:FindFirstChild("Communicate")
+    if not remote or hooked[remote] then return end
+    hooked[remote] = true
+
+    remote.OnClientEvent:Connect(function(...)
+        local args = {...}
+        log("IN  ▼", "Communicate", args, "Server → "..playerName)
+    end)
+end
+
+-- Себя
+local function onCharAdded(char)
+    char:WaitForChild("Communicate", 10)
+    hookCommunicate(char, LocalPlayer.Name.." (self)")
+end
+if LocalPlayer.Character then onCharAdded(LocalPlayer.Character) end
+LocalPlayer.CharacterAdded:Connect(onCharAdded)
+
+-- Других игроков (видим входящие им от сервера)
+for _, p in pairs(Players:GetPlayers()) do
+    if p ~= LocalPlayer and p.Character then
+        hookCommunicate(p.Character, p.Name)
+    end
+end
+Players.PlayerAdded:Connect(function(p)
+    p.CharacterAdded:Connect(function(char)
+        char:WaitForChild("Communicate", 10)
+        hookCommunicate(char, p.Name)
+    end)
+end)
+
+------------------------------------------------
+-- GUI (минималистичная scrolling лента)
+------------------------------------------------
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "CommSpy"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent = game:GetService("CoreGui")
+
+local Frame = Instance.new("Frame")
+Frame.Size = UDim2.new(0, 520, 0, 340)
+Frame.Position = UDim2.new(0, 8, 0.5, -170)
+Frame.BackgroundColor3 = Color3.fromRGB(12, 12, 16)
+Frame.BorderSizePixel = 0
+Frame.Parent = ScreenGui
+
+-- Drag
+do
+    local drag, dragStart, startPos = false
+    Frame.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then
+            drag = true; dragStart = i.Position; startPos = Frame.Position
+        end
+    end)
+    Frame.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = false end
+    end)
+    game:GetService("UserInputService").InputChanged:Connect(function(i)
+        if drag and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = i.Position - dragStart
+            Frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+-- Header
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 26)
+Header.BackgroundColor3 = Color3.fromRGB(22, 22, 30)
+Header.BorderSizePixel = 0
+Header.Parent = Frame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -60, 1, 0)
+Title.Position = UDim2.new(0, 8, 0, 0)
+Title.BackgroundTransparency = 1
+Title.Text = "◈ Communicate Spy"
+Title.TextColor3 = Color3.fromRGB(180, 200, 255)
+Title.TextSize = 13
+Title.Font = Enum.Font.Code
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.Parent = Header
+
+local ClearBtn = Instance.new("TextButton")
+ClearBtn.Size = UDim2.new(0, 50, 1, -4)
+ClearBtn.Position = UDim2.new(1, -54, 0, 2)
+ClearBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+ClearBtn.BorderSizePixel = 0
+ClearBtn.Text = "Clear"
+ClearBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
+ClearBtn.TextSize = 11
+ClearBtn.Font = Enum.Font.Code
+ClearBtn.Parent = Header
+ClearBtn.MouseButton1Click:Connect(function() logs = {} end)
+
+-- Scroll
+local Scroll = Instance.new("ScrollingFrame")
+Scroll.Size = UDim2.new(1, 0, 1, -26)
+Scroll.Position = UDim2.new(0, 0, 0, 26)
+Scroll.BackgroundTransparency = 1
+Scroll.BorderSizePixel = 0
+Scroll.ScrollBarThickness = 4
+Scroll.ScrollBarImageColor3 = Color3.fromRGB(80, 80, 120)
+Scroll.Parent = Frame
+
+local Layout = Instance.new("UIListLayout")
+Layout.SortOrder = Enum.SortOrder.LayoutOrder
+Layout.Padding = UDim.new(0, 1)
+Layout.Parent = Scroll
+
+-- Update loop
+local rowPool = {}
+local function getRow()
+    if #rowPool > 0 then return table.remove(rowPool) end
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 0)
+    f.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+    f.BorderSizePixel = 0
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -8, 1, 0)
+    lbl.Position = UDim2.new(0, 6, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.TextColor3 = Color3.fromRGB(200, 210, 240)
+    lbl.TextSize = 11
+    lbl.Font = Enum.Font.Code
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextWrapped = true
+    lbl.Parent = f
+    f._lbl = lbl
+    return f
+end
+
+local lastCount = 0
+RunService.Heartbeat:Connect(function()
+    if #logs == lastCount then return end
+    lastCount = #logs
+
+    for _, c in pairs(Scroll:GetChildren()) do
+        if c:IsA("Frame") then
+            c._lbl.Text = ""
+            c.Parent = nil
+            table.insert(rowPool, c)
+        end
+    end
+
+    local order = 0
+    for _, entry in ipairs(logs) do
+        local isOut = entry.tag:find("OUT")
+        local goal  = (type(entry.args[1]) == "table" and entry.args[1].Goal) and entry.args[1].Goal or nil
+
+        local lines = {
+            string.format("%s [%s] %s  ·  %s%s",
+                entry.time, entry.tag, entry.remote, entry.source,
+                goal and ("  Goal: "..goal) or ""),
+            "    "..formatArgs(entry.args),
+        }
+        local text = table.concat(lines, "\n")
+
+        local row = getRow()
+        row.LayoutOrder = order
+        order += 1
+
+        local lineCount = select(2, text:gsub("\n", "\n")) + 1
+        row.Size = UDim2.new(1, 0, 0, 14 * lineCount + 8)
+        row.BackgroundColor3 = isOut
+            and Color3.fromRGB(20, 28, 20)
+            or  Color3.fromRGB(20, 20, 32)
+
+        row._lbl.Text = text
+        row._lbl.TextColor3 = isOut
+            and Color3.fromRGB(150, 255, 160)
+            or  Color3.fromRGB(140, 180, 255)
+
+        row.Parent = Scroll
+    end
+
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y + 4)
+end)
+
+print("[CommSpy] Loaded — hooking Communicate FireServer + OnClientEvent")
