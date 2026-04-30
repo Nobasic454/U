@@ -137,14 +137,14 @@ SG.Parent          = gethui
 
 -- Root frame
 local F = Instance.new("Frame")
-F.Size              = UDim2.new(0, 460, 0, 320)
+F.Size              = UDim2.new(0, 460, 0, 300)
 F.Position          = UDim2.new(0, 10, 0.5, -200)
 F.BackgroundColor3  = Color3.fromRGB(9, 9, 13)
 F.BorderSizePixel   = 0
 F.Parent            = SG
 Instance.new("UICorner", F).CornerRadius = UDim.new(0, 6)
 
--- Drag — только по хедеру
+-- Drag — только через Header чтобы кнопки и scroll не съедали инпут
 do
     local drag, ds, sp
     H.InputBegan:Connect(function(i)
@@ -168,7 +168,6 @@ local H = Instance.new("Frame")
 H.Size             = UDim2.new(1, 0, 0, 30)
 H.BackgroundColor3 = Color3.fromRGB(16, 16, 24)
 H.BorderSizePixel  = 0
-H.ZIndex           = 10
 H.Parent           = F
 Instance.new("UICorner", H).CornerRadius = UDim.new(0, 6)
 
@@ -176,12 +175,11 @@ local Ttl = Instance.new("TextLabel")
 Ttl.Size               = UDim2.new(1, -10, 1, 0)
 Ttl.Position           = UDim2.new(0, 10, 0, 0)
 Ttl.BackgroundTransparency = 1
-Ttl.Text               = "◈  Communicate Spy  v3"
+Ttl.Text               = "◈ CommSpy v3"
 Ttl.TextColor3         = Color3.fromRGB(160, 185, 255)
 Ttl.TextSize           = 13
 Ttl.Font               = Enum.Font.Code
 Ttl.TextXAlignment     = Enum.TextXAlignment.Left
-Ttl.ZIndex             = 11
 Ttl.Parent             = H
 
 -- ── Toolbar ─────────────────────────────────────────────────────────────────
@@ -194,7 +192,7 @@ TB.Parent           = F
 
 local function makeBtn(text, xOff, color, textColor)
     local b = Instance.new("TextButton")
-    b.Size             = UDim2.new(0, 54, 0, 20)
+    b.Size             = UDim2.new(0, 60, 0, 20)
     b.Position         = UDim2.new(0, xOff, 0, 4)
     b.BackgroundColor3 = color or Color3.fromRGB(30, 30, 45)
     b.BorderSizePixel  = 0
@@ -208,15 +206,15 @@ local function makeBtn(text, xOff, color, textColor)
 end
 
 -- Buttons: Stop | Copy | Clear | Close
-local BtnStop  = makeBtn("■ Stop",  4,   Color3.fromRGB(50, 20, 20),  Color3.fromRGB(255, 100, 100))
-local BtnCopy  = makeBtn("⎘ Copy",  61,  Color3.fromRGB(20, 35, 50),  Color3.fromRGB(100, 180, 255))
-local BtnClear = makeBtn("✕ Clear", 118, Color3.fromRGB(30, 30, 45),  Color3.fromRGB(200, 200, 220))
-local BtnClose = makeBtn("Close",   175, Color3.fromRGB(45, 20, 20),  Color3.fromRGB(220, 120, 120))
+local BtnStop  = makeBtn("■ Stop",  6,   Color3.fromRGB(50, 20, 20),  Color3.fromRGB(255, 100, 100))
+local BtnCopy  = makeBtn("⎘ Copy",  70,  Color3.fromRGB(20, 35, 50),  Color3.fromRGB(100, 180, 255))
+local BtnClear = makeBtn("✕ Clear", 134, Color3.fromRGB(30, 30, 45),  Color3.fromRGB(200, 200, 220))
+local BtnClose = makeBtn("Close",   198, Color3.fromRGB(45, 20, 20),  Color3.fromRGB(220, 120, 120))
 
 -- Status label (right side)
 local StatusLbl = Instance.new("TextLabel")
-StatusLbl.Size              = UDim2.new(0, 160, 1, 0)
-StatusLbl.Position          = UDim2.new(1, -165, 0, 0)
+StatusLbl.Size              = UDim2.new(0, 200, 1, 0)
+StatusLbl.Position          = UDim2.new(1, -205, 0, 0)
 StatusLbl.BackgroundTransparency = 1
 StatusLbl.Text              = "● recording"
 StatusLbl.TextColor3        = Color3.fromRGB(80, 220, 100)
@@ -290,12 +288,12 @@ SelLbl.Parent           = SelBar
 
 local function setSelBarVisible(show)
     if show then
-        F.Size       = UDim2.new(0, 460, 0, 340)
+        F.Size       = UDim2.new(0, 460, 0, 320)
         Scroll.Size  = UDim2.new(1, 0, 1, -102)
         SelBar.Size  = UDim2.new(1, 0, 0, 20)
         SelBar.Position = UDim2.new(0, 0, 1, -20)
     else
-        F.Size       = UDim2.new(0, 460, 0, 320)
+        F.Size       = UDim2.new(0, 460, 0, 300)
         Scroll.Size  = UDim2.new(1, 0, 1, -82)
         SelBar.Size  = UDim2.new(1, 0, 0, 0)
     end
