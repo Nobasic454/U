@@ -1,10 +1,11 @@
--- Communicate Spy v2
--- FireServer hook через hookmetamethod (не ломает инпуты)
--- checkcaller() = не трогаем собственные вызовы эксплойта
+-- Communicate Spy v3
+-- hookmetamethod + checkcaller (не ломает инпуты)
+-- Stop / Select / Copy / Smart Clear
 
 local Players     = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local RunService  = game:GetService("RunService")
+local UIS         = game:GetService("UserInputService")
 
 ------------------------------------------------
 -- Serialize
@@ -19,26 +20,24 @@ local function serialize(v, depth)
             local key = type(k) == "string" and k or ("["..tostring(k).."]")
             parts[#parts+1] = key.." = "..serialize(val, depth+1)
         end
-        return "{\n"..string.rep("  ", depth+1)..table.concat(parts, ",\n"..string.rep("  ", depth+1)).."\n"..string.rep("  ", depth).."}"
+        return "{ "..table.concat(parts, ", ").." }"
     elseif t == "EnumItem" then
         return "Enum."..tostring(v.EnumType).."."..v.Name
     elseif t == "Instance" then
         return v.ClassName..'("'..v.Name..'")'
-    elseif t == "string" then
-        return '"'..v..'"'
+    elseif t == "string" then return '"'..v..'"'
     elseif t == "Vector3" then
-        return string.format("Vector3(%.2f,%.2f,%.2f)", v.X, v.Y, v.Z)
+        return string.format("V3(%.1f,%.1f,%.1f)", v.X, v.Y, v.Z)
     elseif t == "CFrame" then
-        return string.format("CFrame(%.2f,%.2f,%.2f)", v.X, v.Y, v.Z)
-    else
-        return tostring(v)
+        return string.format("CF(%.1f,%.1f,%.1f)", v.X, v.Y, v.Z)
+    else return tostring(v)
     end
 end
 
-local function formatArgs(args)
-    local parts = {}
-    for i, v in ipairs(args) do parts[i] = serialize(v) end
-    return table.concat(parts, ", ")
+local function fmtArgs(args)
+    local p = {}
+    for i, v in ipairs(args) do p[i] = serialize(v) end
+    return table.concat(p, ",  ")
 end
 
 local function ts()
@@ -46,276 +45,439 @@ local function ts()
 end
 
 ------------------------------------------------
--- Лог
+-- State
 ------------------------------------------------
-local logs = {}
+local logs      = {}
+local paused    = false   -- Stop button
+local selected  = nil     -- selected log entry index
+local dirty     = true
 
 local function pushLog(tag, remoteName, argsStr, source, goal)
+    if paused then return end
     table.insert(logs, 1, {
         tag = tag, remote = remoteName,
         args = argsStr, source = source,
-        goal = goal, time = ts()
+        goal = goal, time = ts(),
+        raw  = string.format('%s\n  args: %s', source, argsStr),
     })
-    if #logs > 300 then table.remove(logs) end
-    local g = goal and ("  Goal="..goal) or ""
-    print(string.format("%s [%s] %s | %s%s\n  %s", ts(), tag, remoteName, source, g, argsStr))
+    if #logs > 400 then table.remove(logs) end
+    -- shift selected index if needed
+    if selected then selected = selected + 1 end
+    dirty = true
 end
 
 ------------------------------------------------
--- FireServer hook (ПРАВИЛЬНЫЙ способ)
--- hookmetamethod + checkcaller() чтобы не трогать свои вызовы
+-- hookmetamethod — не ломает инпуты
 ------------------------------------------------
 local OldNamecall
 OldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
     local method = getnamecallmethod()
-
-    -- checkcaller() = это наш эксплойт-код → не логируем, не мешаем
     if not checkcaller() then
         if method == "FireServer" and typeof(self) == "Instance" and self:IsA("RemoteEvent") then
             local args = {...}
-            local ok, result = pcall(function()
+            task.spawn(function()
                 local goal = (type(args[1]) == "table" and args[1].Goal) and tostring(args[1].Goal) or nil
-                pushLog("OUT ▲", self.Name, formatArgs(args), LocalPlayer.Name, goal)
+                pushLog("OUT ▲", self.Name, fmtArgs(args), LocalPlayer.Name, goal)
             end)
-        end
-
-        if method == "InvokeServer" and typeof(self) == "Instance" and self:IsA("RemoteFunction") then
+        elseif method == "InvokeServer" and typeof(self) == "Instance" and self:IsA("RemoteFunction") then
             local args = {...}
-            pcall(function()
-                pushLog("OUT ▲ RF", self.Name, formatArgs(args), LocalPlayer.Name, nil)
+            task.spawn(function()
+                pushLog("OUT ▲ RF", self.Name, fmtArgs(args), LocalPlayer.Name, nil)
             end)
         end
     end
-
     return OldNamecall(self, ...)
 end)
 
 ------------------------------------------------
--- OnClientEvent — только то что ТЕБЕ шлёт сервер
--- (чужие клиенты недоступны с нашей стороны)
+-- OnClientEvent — что сервер шлёт тебе
 ------------------------------------------------
 local hooked = {}
-
 local function hookRemote(remote, label)
     if hooked[remote] then return end
     hooked[remote] = true
-
     remote.OnClientEvent:Connect(function(...)
         local args = {...}
-        pcall(function()
+        task.spawn(function()
             local goal = (type(args[1]) == "table" and args[1].Goal) and tostring(args[1].Goal) or nil
-            pushLog("IN  ▼", remote.Name, formatArgs(args), "Server → "..label, goal)
+            pushLog("IN  ▼", remote.Name, fmtArgs(args), "Server→"..label, goal)
         end)
     end)
 end
 
--- Communicate своего персонажа
+local function scanRemotes(parent)
+    for _, v in ipairs(parent:GetDescendants()) do
+        if v:IsA("RemoteEvent") then hookRemote(v, v:GetFullName()) end
+    end
+    parent.DescendantAdded:Connect(function(v)
+        if v:IsA("RemoteEvent") then task.wait(0.1); hookRemote(v, v:GetFullName()) end
+    end)
+end
+
 local function onChar(char)
     local rem = char:WaitForChild("Communicate", 10)
-    if rem then hookRemote(rem, LocalPlayer.Name.." (self)") end
+    if rem then hookRemote(rem, LocalPlayer.Name.."(self)") end
 end
 if LocalPlayer.Character then onChar(LocalPlayer.Character) end
 LocalPlayer.CharacterAdded:Connect(onChar)
 
--- Все RemoteEvent в игре (опционально — можно закомментировать если слишком много шума)
-local function scanRemotes(parent)
-    for _, v in ipairs(parent:GetDescendants()) do
-        if v:IsA("RemoteEvent") then
-            hookRemote(v, v:GetFullName())
-        end
-    end
-    parent.DescendantAdded:Connect(function(v)
-        if v:IsA("RemoteEvent") then
-            task.wait(0.1)
-            hookRemote(v, v:GetFullName())
-        end
-    end)
-end
 scanRemotes(game:GetService("ReplicatedStorage"))
 scanRemotes(workspace)
 
 ------------------------------------------------
 -- GUI
 ------------------------------------------------
-local CoreGui   = game:GetService("CoreGui")
-local gethui    = (gethui and gethui()) or CoreGui
+local gethui    = (gethui and gethui()) or game:GetService("CoreGui")
 
 local SG = Instance.new("ScreenGui")
-SG.Name = "CommSpyV2"
-SG.ResetOnSpawn = false
-SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-SG.Parent = gethui
+SG.Name            = "CommSpyV3"
+SG.ResetOnSpawn    = false
+SG.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+SG.Parent          = gethui
 
--- Main frame
+-- Root frame
 local F = Instance.new("Frame")
-F.Size = UDim2.new(0, 540, 0, 360)
-F.Position = UDim2.new(0, 10, 0.5, -180)
-F.BackgroundColor3 = Color3.fromRGB(10, 10, 14)
-F.BorderSizePixel = 0
-F.Parent = SG
+F.Size              = UDim2.new(0, 580, 0, 400)
+F.Position          = UDim2.new(0, 10, 0.5, -200)
+F.BackgroundColor3  = Color3.fromRGB(9, 9, 13)
+F.BorderSizePixel   = 0
+F.Parent            = SG
 Instance.new("UICorner", F).CornerRadius = UDim.new(0, 6)
 
 -- Drag
 do
-    local dragging, dragStart, startPos
+    local drag, ds, sp
     F.InputBegan:Connect(function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 then
-            dragging = true; dragStart = i.Position; startPos = F.Position
+            drag = true; ds = i.Position; sp = F.Position
         end
     end)
     F.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then drag = false end
     end)
-    game:GetService("UserInputService").InputChanged:Connect(function(i)
-        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
-            local d = i.Position - dragStart
-            F.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+    UIS.InputChanged:Connect(function(i)
+        if drag and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local d = i.Position - ds
+            F.Position = UDim2.new(sp.X.Scale, sp.X.Offset+d.X, sp.Y.Scale, sp.Y.Offset+d.Y)
         end
     end)
 end
 
--- Header
+-- ── Header ──────────────────────────────────────────────────────────────────
 local H = Instance.new("Frame")
-H.Size = UDim2.new(1, 0, 0, 28)
-H.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
-H.BorderSizePixel = 0
-H.Parent = F
+H.Size             = UDim2.new(1, 0, 0, 30)
+H.BackgroundColor3 = Color3.fromRGB(16, 16, 24)
+H.BorderSizePixel  = 0
+H.Parent           = F
+Instance.new("UICorner", H).CornerRadius = UDim.new(0, 6)
 
 local Ttl = Instance.new("TextLabel")
-Ttl.Size = UDim2.new(1, -110, 1, 0)
-Ttl.Position = UDim2.new(0, 10, 0, 0)
+Ttl.Size               = UDim2.new(1, -10, 1, 0)
+Ttl.Position           = UDim2.new(0, 10, 0, 0)
 Ttl.BackgroundTransparency = 1
-Ttl.Text = "◈ Communicate Spy v2"
-Ttl.TextColor3 = Color3.fromRGB(170, 190, 255)
-Ttl.TextSize = 13
-Ttl.Font = Enum.Font.Code
-Ttl.TextXAlignment = Enum.TextXAlignment.Left
-Ttl.Parent = H
+Ttl.Text               = "◈  Communicate Spy  v3"
+Ttl.TextColor3         = Color3.fromRGB(160, 185, 255)
+Ttl.TextSize           = 13
+Ttl.Font               = Enum.Font.Code
+Ttl.TextXAlignment     = Enum.TextXAlignment.Left
+Ttl.Parent             = H
 
-local function makeBtn(text, x, color)
+-- ── Toolbar ─────────────────────────────────────────────────────────────────
+local TB = Instance.new("Frame")
+TB.Size             = UDim2.new(1, 0, 0, 28)
+TB.Position         = UDim2.new(0, 0, 0, 30)
+TB.BackgroundColor3 = Color3.fromRGB(13, 13, 20)
+TB.BorderSizePixel  = 0
+TB.Parent           = F
+
+local function makeBtn(text, xOff, color, textColor)
     local b = Instance.new("TextButton")
-    b.Size = UDim2.new(0, 48, 0, 20)
-    b.Position = UDim2.new(1, x, 0, 4)
-    b.BackgroundColor3 = color or Color3.fromRGB(35, 35, 50)
-    b.BorderSizePixel = 0
-    b.Text = text
-    b.TextColor3 = Color3.fromRGB(200, 200, 220)
-    b.TextSize = 11
-    b.Font = Enum.Font.Code
-    b.Parent = H
+    b.Size             = UDim2.new(0, 60, 0, 20)
+    b.Position         = UDim2.new(0, xOff, 0, 4)
+    b.BackgroundColor3 = color or Color3.fromRGB(30, 30, 45)
+    b.BorderSizePixel  = 0
+    b.Text             = text
+    b.TextColor3       = textColor or Color3.fromRGB(200, 205, 230)
+    b.TextSize         = 11
+    b.Font             = Enum.Font.Code
+    b.Parent           = TB
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 3)
     return b
 end
 
-local BtnClear  = makeBtn("Clear",  -106)
-local BtnClose  = makeBtn("Close",  -54, Color3.fromRGB(60, 25, 25))
+-- Buttons: Stop | Copy | Clear | Close
+local BtnStop  = makeBtn("■ Stop",  6,   Color3.fromRGB(50, 20, 20),  Color3.fromRGB(255, 100, 100))
+local BtnCopy  = makeBtn("⎘ Copy",  70,  Color3.fromRGB(20, 35, 50),  Color3.fromRGB(100, 180, 255))
+local BtnClear = makeBtn("✕ Clear", 134, Color3.fromRGB(30, 30, 45),  Color3.fromRGB(200, 200, 220))
+local BtnClose = makeBtn("Close",   198, Color3.fromRGB(45, 20, 20),  Color3.fromRGB(220, 120, 120))
 
-BtnClear.MouseButton1Click:Connect(function() logs = {} end)
-BtnClose.MouseButton1Click:Connect(function() SG:Destroy() end)
+-- Status label (right side)
+local StatusLbl = Instance.new("TextLabel")
+StatusLbl.Size              = UDim2.new(0, 200, 1, 0)
+StatusLbl.Position          = UDim2.new(1, -205, 0, 0)
+StatusLbl.BackgroundTransparency = 1
+StatusLbl.Text              = "● recording"
+StatusLbl.TextColor3        = Color3.fromRGB(80, 220, 100)
+StatusLbl.TextSize          = 11
+StatusLbl.Font              = Enum.Font.Code
+StatusLbl.TextXAlignment    = Enum.TextXAlignment.Right
+StatusLbl.Parent            = TB
 
--- Filter bar
-local FilterBar = Instance.new("Frame")
-FilterBar.Size = UDim2.new(1, 0, 0, 24)
-FilterBar.Position = UDim2.new(0, 0, 0, 28)
-FilterBar.BackgroundColor3 = Color3.fromRGB(14, 14, 20)
-FilterBar.BorderSizePixel = 0
-FilterBar.Parent = F
+-- ── Filter ──────────────────────────────────────────────────────────────────
+local FB = Instance.new("Frame")
+FB.Size             = UDim2.new(1, 0, 0, 24)
+FB.Position         = UDim2.new(0, 0, 0, 58)
+FB.BackgroundColor3 = Color3.fromRGB(11, 11, 18)
+FB.BorderSizePixel  = 0
+FB.Parent           = F
 
-local FilterInput = Instance.new("TextBox")
-FilterInput.Size = UDim2.new(1, -10, 1, -6)
-FilterInput.Position = UDim2.new(0, 5, 0, 3)
-FilterInput.BackgroundColor3 = Color3.fromRGB(22, 22, 32)
-FilterInput.BorderSizePixel = 0
-FilterInput.PlaceholderText = "Filter by Goal / remote name..."
-FilterInput.PlaceholderColor3 = Color3.fromRGB(80, 80, 100)
-FilterInput.Text = ""
-FilterInput.TextColor3 = Color3.fromRGB(200, 210, 240)
-FilterInput.TextSize = 11
-FilterInput.Font = Enum.Font.Code
-FilterInput.TextXAlignment = Enum.TextXAlignment.Left
-FilterInput.ClearTextOnFocus = false
-FilterInput.Parent = FilterBar
-Instance.new("UICorner", FilterInput).CornerRadius = UDim.new(0, 3)
-local FPad = Instance.new("UIPadding", FilterInput)
-FPad.PaddingLeft = UDim.new(0, 4)
+local FI = Instance.new("TextBox")
+FI.Size                 = UDim2.new(1, -10, 1, -6)
+FI.Position             = UDim2.new(0, 5, 0, 3)
+FI.BackgroundColor3     = Color3.fromRGB(20, 20, 30)
+FI.BorderSizePixel      = 0
+FI.PlaceholderText      = "Filter: remote name / Goal / source..."
+FI.PlaceholderColor3    = Color3.fromRGB(70, 70, 95)
+FI.Text                 = ""
+FI.TextColor3           = Color3.fromRGB(200, 210, 240)
+FI.TextSize             = 11
+FI.Font                 = Enum.Font.Code
+FI.TextXAlignment       = Enum.TextXAlignment.Left
+FI.ClearTextOnFocus     = false
+FI.Parent               = FB
+Instance.new("UICorner", FI).CornerRadius = UDim.new(0, 3)
+local FPad = Instance.new("UIPadding", FI); FPad.PaddingLeft = UDim.new(0, 5)
 
--- Scroll
+-- ── Scroll ───────────────────────────────────────────────────────────────────
 local Scroll = Instance.new("ScrollingFrame")
-Scroll.Size = UDim2.new(1, 0, 1, -52)
-Scroll.Position = UDim2.new(0, 0, 0, 52)
+Scroll.Size                 = UDim2.new(1, 0, 1, -82)
+Scroll.Position             = UDim2.new(0, 0, 0, 82)
 Scroll.BackgroundTransparency = 1
-Scroll.BorderSizePixel = 0
-Scroll.ScrollBarThickness = 4
-Scroll.ScrollBarImageColor3 = Color3.fromRGB(70, 70, 110)
-Scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-Scroll.Parent = F
+Scroll.BorderSizePixel      = 0
+Scroll.ScrollBarThickness   = 4
+Scroll.ScrollBarImageColor3 = Color3.fromRGB(60, 60, 100)
+Scroll.AutomaticCanvasSize  = Enum.AutomaticSize.Y
+Scroll.CanvasSize           = UDim2.new(0, 0, 0, 0)
+Scroll.Parent               = F
 
 local Layout = Instance.new("UIListLayout")
-Layout.SortOrder = Enum.SortOrder.LayoutOrder
-Layout.Padding = UDim.new(0, 1)
-Layout.Parent = Scroll
+Layout.SortOrder  = Enum.SortOrder.LayoutOrder
+Layout.Padding    = UDim.new(0, 1)
+Layout.Parent     = Scroll
 
--- Render loop
-local lastCount = -1
-local lastFilter = ""
+-- ── Selected info bar ────────────────────────────────────────────────────────
+local SelBar = Instance.new("Frame")
+SelBar.Size             = UDim2.new(1, 0, 0, 0)  -- hidden by default
+SelBar.Position         = UDim2.new(0, 0, 1, -0)
+SelBar.BackgroundColor3 = Color3.fromRGB(20, 30, 50)
+SelBar.BorderSizePixel  = 0
+SelBar.ClipsDescendants = true
+SelBar.Parent           = F
 
-RunService.Heartbeat:Connect(function()
-    local filter = FilterInput.Text:lower()
-    if #logs == lastCount and filter == lastFilter then return end
-    lastCount = #logs
-    lastFilter = filter
+local SelLbl = Instance.new("TextLabel")
+SelLbl.Size             = UDim2.new(1, -10, 1, 0)
+SelLbl.Position         = UDim2.new(0, 6, 0, 0)
+SelLbl.BackgroundTransparency = 1
+SelLbl.Text             = ""
+SelLbl.TextColor3       = Color3.fromRGB(130, 175, 255)
+SelLbl.TextSize         = 10
+SelLbl.Font             = Enum.Font.Code
+SelLbl.TextXAlignment   = Enum.TextXAlignment.Left
+SelLbl.TextTruncate     = Enum.TextTruncate.AtEnd
+SelLbl.Parent           = SelBar
 
-    -- Clear rows
-    for _, c in ipairs(Scroll:GetChildren()) do
-        if c:IsA("Frame") then c:Destroy() end
+local function setSelBarVisible(show)
+    if show then
+        F.Size       = UDim2.new(0, 580, 0, 420)
+        Scroll.Size  = UDim2.new(1, 0, 1, -102)
+        SelBar.Size  = UDim2.new(1, 0, 0, 20)
+        SelBar.Position = UDim2.new(0, 0, 1, -20)
+    else
+        F.Size       = UDim2.new(0, 580, 0, 400)
+        Scroll.Size  = UDim2.new(1, 0, 1, -82)
+        SelBar.Size  = UDim2.new(1, 0, 0, 0)
     end
+end
 
-    local order = 0
-    for _, e in ipairs(logs) do
-        -- filter
-        if filter ~= "" then
-            local haystack = (e.remote.."|"..(e.goal or "").."|"..e.source):lower()
-            if not haystack:find(filter, 1, true) then continue end
-        end
-
-        local isOut = e.tag:find("OUT")
-        local row   = Instance.new("Frame")
-        row.LayoutOrder = order; order += 1
-        row.Size = UDim2.new(1, 0, 0, 0)
-        row.AutomaticSize = Enum.AutomaticSize.Y
-        row.BackgroundColor3 = isOut and Color3.fromRGB(16, 26, 16) or Color3.fromRGB(16, 16, 30)
-        row.BorderSizePixel = 0
-        row.Parent = Scroll
-
-        -- left color bar
-        local bar = Instance.new("Frame")
-        bar.Size = UDim2.new(0, 3, 1, 0)
-        bar.BackgroundColor3 = isOut and Color3.fromRGB(80, 200, 100) or Color3.fromRGB(80, 120, 255)
-        bar.BorderSizePixel = 0
-        bar.Parent = row
-
-        local lbl = Instance.new("TextLabel")
-        lbl.Size = UDim2.new(1, -12, 0, 0)
-        lbl.Position = UDim2.new(0, 8, 0, 3)
-        lbl.AutomaticSize = Enum.AutomaticSize.Y
-        lbl.BackgroundTransparency = 1
-        lbl.TextColor3 = isOut and Color3.fromRGB(140, 255, 155) or Color3.fromRGB(130, 170, 255)
-        lbl.TextSize = 11
-        lbl.Font = Enum.Font.Code
-        lbl.TextXAlignment = Enum.TextXAlignment.Left
-        lbl.TextWrapped = true
-        lbl.RichText = false
-
-        -- header line
-        local goal = e.goal and ("  Goal: "..e.goal) or ""
-        lbl.Text = string.format("%s [%s] %s  |  %s%s\n  %s",
-            e.time, e.tag, e.remote, e.source, goal, e.args)
-        lbl.Parent = row
-
-        local pad = Instance.new("UIPadding", row)
-        pad.PaddingBottom = UDim.new(0, 4)
+------------------------------------------------
+-- Button logic
+------------------------------------------------
+-- Stop / Resume
+BtnStop.MouseButton1Click:Connect(function()
+    paused = not paused
+    if paused then
+        BtnStop.Text            = "▶ Resume"
+        BtnStop.BackgroundColor3 = Color3.fromRGB(20, 45, 20)
+        BtnStop.TextColor3      = Color3.fromRGB(100, 255, 120)
+        StatusLbl.Text          = "■ paused"
+        StatusLbl.TextColor3    = Color3.fromRGB(220, 100, 100)
+    else
+        BtnStop.Text            = "■ Stop"
+        BtnStop.BackgroundColor3 = Color3.fromRGB(50, 20, 20)
+        BtnStop.TextColor3      = Color3.fromRGB(255, 100, 100)
+        StatusLbl.Text          = "● recording"
+        StatusLbl.TextColor3    = Color3.fromRGB(80, 220, 100)
     end
 end)
 
-print("[CommSpy v2] Loaded. hookmetamethod active.")
+-- Copy selected entry to clipboard
+BtnCopy.MouseButton1Click:Connect(function()
+    if not selected or not logs[selected] then
+        -- nothing selected — show hint
+        StatusLbl.Text       = "select a row first"
+        StatusLbl.TextColor3 = Color3.fromRGB(255, 200, 60)
+        task.delay(2, function()
+            if not paused then
+                StatusLbl.Text       = "● recording"
+                StatusLbl.TextColor3 = Color3.fromRGB(80, 220, 100)
+            end
+        end)
+        return
+    end
+    local e   = logs[selected]
+    local txt = string.format(
+        "-- %s [%s] %s | %s%s\nlocal args = { %s }\n-- remote: %s",
+        e.time, e.tag, e.remote, e.source,
+        e.goal and ("  Goal="..e.goal) or "",
+        e.args,
+        e.remote
+    )
+    setclipboard(txt)
+    StatusLbl.Text       = "✓ copied!"
+    StatusLbl.TextColor3 = Color3.fromRGB(100, 255, 140)
+    task.delay(1.5, function()
+        if not paused then
+            StatusLbl.Text       = "● recording"
+            StatusLbl.TextColor3 = Color3.fromRGB(80, 220, 100)
+        end
+    end)
+end)
+
+-- Clear — if something selected: deselect only. If nothing selected: clear all.
+BtnClear.MouseButton1Click:Connect(function()
+    if selected then
+        selected = nil
+        setSelBarVisible(false)
+        SelLbl.Text = ""
+        dirty = true
+    else
+        logs    = {}
+        selected = nil
+        setSelBarVisible(false)
+        dirty = true
+    end
+end)
+
+BtnClose.MouseButton1Click:Connect(function() SG:Destroy() end)
+
+------------------------------------------------
+-- Render
+------------------------------------------------
+local rowCache  = {}
+local lastCount = -1
+local lastFilt  = ""
+local lastSel   = nil
+
+local COLORS = {
+    OUT_BG   = Color3.fromRGB(14, 24, 14),
+    IN_BG    = Color3.fromRGB(14, 14, 28),
+    OUT_BAR  = Color3.fromRGB(70, 200, 90),
+    IN_BAR   = Color3.fromRGB(70, 110, 255),
+    OUT_TEXT = Color3.fromRGB(130, 255, 150),
+    IN_TEXT  = Color3.fromRGB(120, 165, 255),
+    SEL_BG   = Color3.fromRGB(35, 45, 70),
+    SEL_OUT  = Color3.fromRGB(160, 255, 175),
+    SEL_IN   = Color3.fromRGB(155, 195, 255),
+}
+
+local function getRow()
+    if #rowCache > 0 then return table.remove(rowCache) end
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 0)
+    f.AutomaticSize = Enum.AutomaticSize.Y
+    f.BorderSizePixel = 0
+    -- side bar
+    local bar = Instance.new("Frame")
+    bar.Name = "Bar"
+    bar.Size = UDim2.new(0, 3, 1, 0)
+    bar.BorderSizePixel = 0
+    bar.Parent = f
+    -- label
+    local lbl = Instance.new("TextLabel")
+    lbl.Name = "Lbl"
+    lbl.Size = UDim2.new(1, -12, 0, 0)
+    lbl.Position = UDim2.new(0, 8, 0, 3)
+    lbl.AutomaticSize = Enum.AutomaticSize.Y
+    lbl.BackgroundTransparency = 1
+    lbl.TextSize = 11
+    lbl.Font = Enum.Font.Code
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.TextWrapped = true
+    lbl.Parent = f
+    local pad = Instance.new("UIPadding", f)
+    pad.PaddingBottom = UDim.new(0, 4)
+    pad.PaddingTop    = UDim.new(0, 2)
+    f._bar = bar; f._lbl = lbl
+    return f
+end
+
+RunService.Heartbeat:Connect(function()
+    local filter = FI.Text:lower()
+    if not dirty and #logs == lastCount and filter == lastFilt and selected == lastSel then return end
+    dirty = false; lastCount = #logs; lastFilt = filter; lastSel = selected
+
+    -- recycle rows
+    for _, c in ipairs(Scroll:GetChildren()) do
+        if c:IsA("Frame") then
+            c.Parent = nil
+            c.Visible = true
+            table.insert(rowCache, c)
+        end
+    end
+
+    local order = 0
+    for idx, e in ipairs(logs) do
+        if filter ~= "" then
+            local hay = (e.remote.."|"..(e.goal or "").."|"..e.source):lower()
+            if not hay:find(filter, 1, true) then continue end
+        end
+
+        local isOut = e.tag:sub(1,3) == "OUT"
+        local isSel = (idx == selected)
+
+        local row = getRow()
+        row.LayoutOrder      = order; order += 1
+        row.BackgroundColor3 = isSel and COLORS.SEL_BG or (isOut and COLORS.OUT_BG or COLORS.IN_BG)
+        row._bar.BackgroundColor3 = isOut and COLORS.OUT_BAR or COLORS.IN_BAR
+        row._lbl.TextColor3       = isSel and (isOut and COLORS.SEL_OUT or COLORS.SEL_IN)
+                                           or (isOut and COLORS.OUT_TEXT or COLORS.IN_TEXT)
+
+        local goal = e.goal and ("  Goal:"..e.goal) or ""
+        row._lbl.Text = string.format("%s [%s] %s  |  %s%s\n    %s",
+            e.time, e.tag, e.remote, e.source, goal, e.args)
+        row.Parent = Scroll
+
+        -- click to select
+        local captureIdx = idx
+        row.InputBegan:Connect(function(inp)
+            if inp.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+            if selected == captureIdx then
+                -- деселект
+                selected = nil
+                setSelBarVisible(false)
+                SelLbl.Text = ""
+            else
+                selected = captureIdx
+                local en = logs[captureIdx]
+                if en then
+                    SelLbl.Text = string.format("[%s] %s | %s | %s",
+                        en.tag, en.remote, en.source, en.args)
+                    setSelBarVisible(true)
+                end
+            end
+            dirty = true
+        end)
+    end
+end)
+
+print("[CommSpy v3] ready  —  hookmetamethod active, paused="..tostring(paused))
